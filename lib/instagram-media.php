@@ -218,7 +218,7 @@ function ig_cache_read(string $key): ?array
     }
 
     $data = json_decode($raw, true);
-    if (!is_array($data) || empty($data['direct_url'])) {
+    if (!is_array($data)) {
         return null;
     }
 
@@ -228,6 +228,164 @@ function ig_cache_read(string $key): ?array
     }
 
     return $data;
+}
+
+/**
+ * Prepara embed Discord: lock + una sola descarga yt-dlp + meta.
+ * Solo OK si el MP4 local está listo (con audio).
+ *
+ * @return array{meta: array, local_path: string, video_url: string}|null
+ */
+function prepare_instagram_embed(string $type, string $id, string $query = ''): ?array
+{
+    return ig_with_media_lock($type, $id, static function () use ($type, $id, $query): ?array {
+        $localPath = ig_local_video_path($type, $id);
+        $cacheKey = ig_cache_key($type, $id, $query);
+
+        $instagramUrl = 'https://www.instagram.com/' . $type . '/' . $id . '/';
+        if ($query !== '') {
+            parse_str($query, $params);
+            unset($params['raw']);
+            if ($params !== []) {
+                $instagramUrl .= '?' . http_build_query($params);
+            }
+        }
+
+        // Hit caliente: archivo listo → respuesta inmediata
+        if (ig_local_video_ready($localPath)) {
+            $meta = ig_cache_read($cacheKey) ?? ig_meta_from_local($localPath, $instagramUrl, $type);
+            return [
+                'meta' => $meta,
+                'local_path' => $localPath,
+                'video_url' => build_proxy_video_url($type, $id),
+            ];
+        }
+
+        // Una pasada: descarga + info-json (sin dump-json previo)
+        $download = ig_ensure_local_video($instagramUrl, $localPath, false);
+        if (!$download['ok'] || !ig_local_video_ready($localPath)) {
+            error_log('[ig.weko.lol] prepare falló para ' . $instagramUrl);
+            return null;
+        }
+
+        $meta = ig_meta_from_ytdlp_info($download['meta'] ?? null, $instagramUrl, $type, $localPath);
+        ig_cache_write($cacheKey, $meta);
+
+        return [
+            'meta' => $meta,
+            'local_path' => $localPath,
+            'video_url' => build_proxy_video_url($type, $id),
+        ];
+    });
+}
+
+/**
+ * @param array<string, mixed>|null $info
+ * @return array<string, mixed>
+ */
+function ig_meta_from_ytdlp_info(?array $info, string $instagramUrl, string $type, string $localPath): array
+{
+    $width = IG_DEFAULT_WIDTH;
+    $height = IG_DEFAULT_HEIGHT;
+    $title = 'Instagram ' . $type;
+    $author = '';
+    $duration = null;
+    $direct = '';
+
+    if (is_array($info)) {
+        $title = (string) ($info['title'] ?? $title);
+        $author = (string) ($info['uploader'] ?? $info['channel'] ?? $info['creator'] ?? '');
+        $duration = isset($info['duration']) ? (int) $info['duration'] : null;
+        $width = (int) ($info['width'] ?? $width);
+        $height = (int) ($info['height'] ?? $height);
+        $direct = (string) ($info['url'] ?? '');
+
+        $picked = ig_pick_best_video_format($info);
+        if ($picked !== null) {
+            $width = (int) ($picked['width'] ?? $width);
+            $height = (int) ($picked['height'] ?? $height);
+            if ($direct === '') {
+                $direct = (string) $picked['url'];
+            }
+        }
+    }
+
+    // Fallback dimensiones desde el archivo
+    if ($width <= 0 || $height <= 0 || ($width === IG_DEFAULT_WIDTH && $height === IG_DEFAULT_HEIGHT)) {
+        $probed = ig_probe_video_size($localPath);
+        if ($probed !== null) {
+            $width = $probed['width'];
+            $height = $probed['height'];
+        }
+    }
+
+    if ($width <= 0) {
+        $width = IG_DEFAULT_WIDTH;
+    }
+    if ($height <= 0) {
+        $height = IG_DEFAULT_HEIGHT;
+    }
+
+    return [
+        'direct_url' => $direct,
+        'title' => $title,
+        'author' => $author,
+        'thumbnail' => is_array($info) ? (string) ($info['thumbnail'] ?? '') : '',
+        'width' => $width,
+        'height' => $height,
+        'mime' => 'video/mp4',
+        'duration' => $duration,
+        'fetched_at' => time(),
+        'instagram_url' => $instagramUrl,
+        'local' => true,
+    ];
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function ig_meta_from_local(string $localPath, string $instagramUrl, string $type): array
+{
+    $probed = ig_probe_video_size($localPath);
+
+    return [
+        'direct_url' => '',
+        'title' => 'Instagram ' . $type,
+        'author' => '',
+        'thumbnail' => '',
+        'width' => $probed['width'] ?? IG_DEFAULT_WIDTH,
+        'height' => $probed['height'] ?? IG_DEFAULT_HEIGHT,
+        'mime' => 'video/mp4',
+        'duration' => null,
+        'fetched_at' => time(),
+        'instagram_url' => $instagramUrl,
+        'local' => true,
+    ];
+}
+
+/**
+ * @return array{width: int, height: int}|null
+ */
+function ig_probe_video_size(string $localPath): ?array
+{
+    if (!is_file($localPath)) {
+        return null;
+    }
+
+    $ffprobe = trim((string) shell_exec('command -v ffprobe 2>/dev/null'));
+    if ($ffprobe === '') {
+        return null;
+    }
+
+    $cmd = escapeshellarg($ffprobe)
+        . ' -v error -select_streams v:0 -show_entries stream=width,height'
+        . ' -of csv=p=0:s=x ' . escapeshellarg($localPath) . ' 2>/dev/null';
+    $out = trim((string) shell_exec($cmd));
+    if (!preg_match('/^(\d+)x(\d+)$/', $out, $m)) {
+        return null;
+    }
+
+    return ['width' => (int) $m[1], 'height' => (int) $m[2]];
 }
 
 function ig_cache_write(string $key, array $data): void

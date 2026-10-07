@@ -27,7 +27,6 @@ $wantRaw = isset($queryParams['raw']) && (string) $queryParams['raw'] !== '' && 
 unset($queryParams['type'], $queryParams['id'], $queryParams['raw']);
 $forwardQuery = http_build_query($queryParams);
 
-// Tipo de path original (reel vs reels) para el redirect a Instagram
 $pathType = strtolower(is_string($typeRaw) ? $typeRaw : $route['type']);
 if ($pathType !== 'reels') {
     $pathType = $route['type'];
@@ -36,58 +35,56 @@ if ($pathType !== 'reels') {
 $userAgent = $_SERVER['HTTP_USER_AGENT'] ?? '';
 $isBot = is_preview_bot($userAgent);
 
-// Humanos: redirect a Instagram (web / iOS / Android). Bots: embed Discord.
+// Humanos: redirect a Instagram. Bots / ?raw=1: embed o stream.
 if (!$wantRaw && !$isBot) {
     ig_redirect_human_to_instagram($pathType, $route['id'], $forwardQuery);
 }
 
 $pageUrl = build_proxy_page_url($route['type'], $route['id'], $forwardQuery, false);
-$videoUrl = build_proxy_video_url($route['type'], $route['id']);
-$localPath = ig_local_video_path($route['type'], $route['id']);
-$instagramUrl = proxy_request_to_instagram_url($route['type'] . '/' . $route['id'] . '/', $forwardQuery)
-    ?? ('https://www.instagram.com/' . $route['type'] . '/' . $route['id'] . '/');
+$prepared = prepare_instagram_embed($route['type'], $route['id'], $forwardQuery);
 
-$meta = resolve_instagram_video($route['type'], $route['id'], $forwardQuery);
-
-if ($meta === null) {
-    http_response_code(422);
+if ($prepared === null) {
+    // No mentir a Discord con og:video roto (evita cachear fallos)
+    http_response_code(503);
     header('Content-Type: text/html; charset=utf-8');
-    $safeIg = htmlspecialchars($instagramUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
-    echo '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Video no disponible</title><link rel="stylesheet" href="/style.css"></head><body class="page page--error"><main class="card"><h1>Sin video</h1><p>No se encontró un video en este post de Instagram (puede ser solo foto, privado o restringido).</p><p><a class="btn" href="' . $safeIg . '" rel="noopener noreferrer">Abrir en Instagram</a></p></main></body></html>';
+    header('Cache-Control: no-store');
+    $ig = htmlspecialchars(
+        'https://www.instagram.com/' . $route['type'] . '/' . $route['id'] . '/',
+        ENT_QUOTES | ENT_SUBSTITUTE,
+        'UTF-8'
+    );
+    echo '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>ig.weko.lol</title></head><body>';
+    echo '<p>Video temporalmente no disponible. <a href="' . $ig . '">Abrir en Instagram</a></p>';
+    echo '</body></html>';
     exit;
 }
 
-// Materializar MP4 con audio (yt-dlp merge) en /media/
-$instagramCanonical = (string) ($meta['instagram_url'] ?? $instagramUrl);
-if (!ig_ensure_local_video($instagramCanonical, $localPath)) {
-    error_log('[ig.weko.lol] no se pudo materializar video con audio: ' . $instagramCanonical);
-}
+$meta = $prepared['meta'];
+$videoUrl = $prepared['video_url'];
+$localPath = $prepared['local_path'];
 
 if ($wantRaw) {
-    if (is_file($localPath) && filesize($localPath) > 1000) {
-        header('Location: ' . $videoUrl, true, 302);
-        exit;
-    }
-    stream_remote_video($meta['direct_url'], $meta['mime'] ?? 'video/mp4');
+    // 302 al estático (Content-Length correcto vía webserver/CF)
+    header('Location: ' . $videoUrl, true, 302);
     exit;
 }
 
 $ogTags = build_discord_video_og_tags($pageUrl, $videoUrl, $meta);
-$pageTitle = 'ig.weko.lol';
 
 header('Content-Type: text/html; charset=utf-8');
-header('Cache-Control: public, max-age=300');
+header('Cache-Control: public, max-age=120');
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title><?= $pageTitle ?></title>
+    <title>ig.weko.lol</title>
     <?php foreach ($ogTags as $tag): ?>
     <?= $tag . "\n" ?>
     <?php endforeach; ?>
-    <link rel="stylesheet" href="/style.css">
 </head>
 <body></body>
 </html>
+<?php
+// Tras responder al bot, no hay más trabajo; el MP4 ya está en disco.

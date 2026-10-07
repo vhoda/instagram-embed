@@ -219,7 +219,6 @@ function ig_local_video_has_audio(string $localPath): bool
 
     $ffprobe = trim((string) shell_exec('command -v ffprobe 2>/dev/null'));
     if ($ffprobe === '') {
-        // Sin ffprobe: asumir OK si el archivo existe (evita re-descargas infinitas)
         return true;
     }
 
@@ -232,27 +231,79 @@ function ig_local_video_has_audio(string $localPath): bool
 }
 
 /**
- * Materializa MP4 con audio vía yt-dlp (merge progressive/DASH).
- * No usar curl del CDN: Instagram suele servir video-only (sin audio).
+ * Archivo listo para Discord: existe + marcador .ready (o audio verificado una vez).
  */
-function ig_ensure_local_video(string $instagramUrl, string $localPath, bool $force = false): bool
+function ig_local_video_ready(string $localPath): bool
 {
-    if (!$force && is_file($localPath) && filesize($localPath) > 1000 && ig_local_video_has_audio($localPath)) {
+    if (!is_file($localPath) || filesize($localPath) < 1000) {
+        return false;
+    }
+
+    if (is_file($localPath . '.ready')) {
         return true;
     }
 
-    if ($force && is_file($localPath)) {
-        @unlink($localPath);
+    if (ig_local_video_has_audio($localPath)) {
+        @file_put_contents($localPath . '.ready', (string) time());
+        return true;
     }
 
-    // Si existe pero sin audio, forzar re-descarga
-    if (!$force && is_file($localPath) && filesize($localPath) > 1000 && !ig_local_video_has_audio($localPath)) {
-        @unlink($localPath);
+    return false;
+}
+
+/**
+ * Lock por reel para evitar dobles descargas concurrentes (Discord hace varias peticiones).
+ *
+ * @template T
+ * @param callable(): T $fn
+ * @return T
+ */
+function ig_with_media_lock(string $type, string $id, callable $fn): mixed
+{
+    $lockDir = IG_CACHE_DIR . '/locks';
+    if (!is_dir($lockDir)) {
+        @mkdir($lockDir, 0775, true);
     }
 
+    $lockPath = $lockDir . '/' . preg_replace('/[^A-Za-z0-9_-]/', '_', $type . '_' . $id) . '.lock';
+    $fp = fopen($lockPath, 'c+');
+    if ($fp === false) {
+        return $fn();
+    }
+
+    flock($fp, LOCK_EX);
+    try {
+        return $fn();
+    } finally {
+        flock($fp, LOCK_UN);
+        fclose($fp);
+    }
+}
+
+/**
+ * Materializa MP4 con audio vía yt-dlp (con lock + reintentos en ytdlp.php).
+ *
+ * @return array{ok: bool, meta: ?array}
+ */
+function ig_ensure_local_video(string $instagramUrl, string $localPath, bool $force = false): array
+{
     require_once __DIR__ . '/ytdlp.php';
 
-    return ig_ytdlp_download($instagramUrl, $localPath);
+    if (!$force && ig_local_video_ready($localPath)) {
+        return ['ok' => true, 'meta' => null];
+    }
+
+    if ($force || (is_file($localPath) && !ig_local_video_ready($localPath))) {
+        @unlink($localPath);
+        @unlink($localPath . '.ready');
+    }
+
+    $result = ig_ytdlp_download($instagramUrl, $localPath);
+
+    return [
+        'ok' => (bool) ($result['ok'] ?? false),
+        'meta' => is_array($result['meta'] ?? null) ? $result['meta'] : null,
+    ];
 }
 
 /**

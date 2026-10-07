@@ -173,6 +173,50 @@ function ig_local_video_path(string $type, string $id): string
     return IG_MEDIA_DIR . '/' . $type . '_' . $id . '.mp4';
 }
 
+/** Base sin extensión: media/{type}_{id} */
+function ig_local_media_base(string $type, string $id): string
+{
+    return IG_MEDIA_DIR . '/' . $type . '_' . $id;
+}
+
+function ig_find_local_image(string $type, string $id): ?string
+{
+    foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
+        $path = ig_local_media_base($type, $id) . '.' . $ext;
+        if (is_file($path) && filesize($path) > 200) {
+            return $path;
+        }
+    }
+
+    return null;
+}
+
+function build_proxy_image_url(string $type, string $id): ?string
+{
+    $path = ig_find_local_image($type, $id);
+    if ($path === null) {
+        return null;
+    }
+
+    $name = basename($path);
+    $url = IG_SITE_URL . '/media/' . $name;
+    $url .= '?v=' . filemtime($path);
+
+    return $url;
+}
+
+function ig_guess_image_mime(string $path): string
+{
+    $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION) ?: 'jpg');
+
+    return match ($ext) {
+        'png' => 'image/png',
+        'webp' => 'image/webp',
+        'jpeg', 'jpg' => 'image/jpeg',
+        default => 'image/jpeg',
+    };
+}
+
 function is_preview_bot(?string $userAgent): bool
 {
     if ($userAgent === null || $userAgent === '') {

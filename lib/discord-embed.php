@@ -41,3 +41,34 @@ function build_discord_video_og_tags(string $pageUrl, string $rawVideoUrl, array
         '<meta name="twitter:player:height" content="' . $height . '">',
     ];
 }
+
+/**
+ * Meta OG para imagen — mismo patrón que weko.lol/media.php (sin título/descripción).
+ *
+ * @param array{width?: int, height?: int, mime?: string} $meta
+ * @return list<string>
+ */
+function build_discord_image_og_tags(string $pageUrl, string $imageUrl, array $meta = []): array
+{
+    $width = (int) ($meta['width'] ?? 1080);
+    $height = (int) ($meta['height'] ?? 1080);
+    $mime = (string) ($meta['mime'] ?? 'image/jpeg');
+
+    if ($width <= 0) {
+        $width = 1080;
+    }
+    if ($height <= 0) {
+        $height = 1080;
+    }
+
+    // Igual que weko imágenes: solo la imagen, sin título/descripción.
+    return [
+        '<meta property="og:type" content="website">',
+        '<meta property="og:image" content="' . $imageUrl . '">',
+        '<meta property="og:image:type" content="' . $mime . '">',
+        '<meta property="og:image:width" content="' . $width . '">',
+        '<meta property="og:image:height" content="' . $height . '">',
+        '<meta name="twitter:card" content="summary_large_image">',
+        '<meta name="twitter:image" content="' . $imageUrl . '">',
+    ];
+}

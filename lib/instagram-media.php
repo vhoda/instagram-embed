@@ -231,15 +231,20 @@ function ig_cache_read(string $key): ?array
 }
 
 /**
- * Prepara embed Discord: lock + una sola descarga yt-dlp + meta.
- * Solo OK si el MP4 local está listo (con audio).
+ * Prepara embed Discord: video (/reel,/tv,/p con video) o imagen (/p foto).
  *
- * @return array{meta: array, local_path: string, video_url: string}|null
+ * @return array{
+ *   kind: 'video'|'image',
+ *   meta: array,
+ *   local_path: string,
+ *   media_url: string
+ * }|null
  */
 function prepare_instagram_embed(string $type, string $id, string $query = ''): ?array
 {
     return ig_with_media_lock($type, $id, static function () use ($type, $id, $query): ?array {
-        $localPath = ig_local_video_path($type, $id);
+        $videoPath = ig_local_video_path($type, $id);
+        $imageBase = ig_local_media_base($type, $id);
         $cacheKey = ig_cache_key($type, $id, $query);
 
         $instagramUrl = 'https://www.instagram.com/' . $type . '/' . $id . '/';
@@ -251,31 +256,98 @@ function prepare_instagram_embed(string $type, string $id, string $query = ''): 
             }
         }
 
-        // Hit caliente: archivo listo → respuesta inmediata
-        if (ig_local_video_ready($localPath)) {
-            $meta = ig_cache_read($cacheKey) ?? ig_meta_from_local($localPath, $instagramUrl, $type);
+        // Hit caliente: video
+        if (ig_local_video_ready($videoPath)) {
+            $meta = ig_cache_read($cacheKey) ?? ig_meta_from_local($videoPath, $instagramUrl, $type);
+            $meta['kind'] = 'video';
+            $meta['mime'] = 'video/mp4';
             return [
+                'kind' => 'video',
                 'meta' => $meta,
-                'local_path' => $localPath,
-                'video_url' => build_proxy_video_url($type, $id),
+                'local_path' => $videoPath,
+                'media_url' => build_proxy_video_url($type, $id),
             ];
         }
 
-        // Una pasada: descarga + info-json (sin dump-json previo)
-        $download = ig_ensure_local_video($instagramUrl, $localPath, false);
-        if (!$download['ok'] || !ig_local_video_ready($localPath)) {
-            error_log('[ig.weko.lol] prepare falló para ' . $instagramUrl);
-            return null;
+        // Hit caliente: imagen
+        $existingImage = ig_find_local_image($type, $id);
+        if ($existingImage !== null && ig_local_image_ready($existingImage)) {
+            $meta = ig_cache_read($cacheKey) ?? ig_meta_from_image_local($existingImage, $instagramUrl, $type);
+            $meta['kind'] = 'image';
+            return [
+                'kind' => 'image',
+                'meta' => $meta,
+                'local_path' => $existingImage,
+                'media_url' => build_proxy_image_url($type, $id) ?? (IG_SITE_URL . '/media/' . basename($existingImage)),
+            ];
         }
 
-        $meta = ig_meta_from_ytdlp_info($download['meta'] ?? null, $instagramUrl, $type, $localPath);
-        ig_cache_write($cacheKey, $meta);
+        // /p/ puede ser foto o video. reel/tv → video.
+        // yt-dlp en fotos solo dice "There is no video in this post" (sin JSON).
+        $wantImage = false;
+        $info = null;
+        $dumpWarnings = '';
 
-        return [
-            'meta' => $meta,
-            'local_path' => $localPath,
-            'video_url' => build_proxy_video_url($type, $id),
-        ];
+        if ($type === 'p') {
+            $dump = ig_ytdlp_dump_json($instagramUrl);
+            $dumpWarnings = (string) ($dump['warnings'] ?? '');
+            if (preg_match('/no video in this post|Only images are available|image only/i', $dumpWarnings)) {
+                $wantImage = true;
+            } elseif (!empty($dump['output'])) {
+                $info = json_decode($dump['output'], true);
+                if (is_array($info) && !ig_ytdlp_info_has_video($info)) {
+                    $wantImage = true;
+                }
+            }
+        }
+
+        if (!$wantImage) {
+            $download = ig_ensure_local_video($instagramUrl, $videoPath, false);
+            if ($download['ok'] && ig_local_video_ready($videoPath)) {
+                $meta = ig_meta_from_ytdlp_info($download['meta'] ?? $info, $instagramUrl, $type, $videoPath);
+                $meta['kind'] = 'video';
+                ig_cache_write($cacheKey, $meta);
+                return [
+                    'kind' => 'video',
+                    'meta' => $meta,
+                    'local_path' => $videoPath,
+                    'media_url' => build_proxy_video_url($type, $id),
+                ];
+            }
+
+            $warn = (string) ($download['warnings'] ?? $dumpWarnings);
+            if (
+                $type === 'p'
+                || preg_match('/Only images are available|image only|no video/i', $warn)
+            ) {
+                $wantImage = true;
+            }
+        }
+
+        if ($wantImage) {
+            // Fotos: /media/?size=l es fiable y rápido; yt-dlp falla con "no video".
+            $img = ig_fetch_instagram_image_direct($id, $imageBase, $query);
+            if (!$img['ok']) {
+                $img = ig_ensure_local_image($instagramUrl, $imageBase, false, $id, $query);
+            }
+            if ($img['ok'] && !empty($img['path']) && ig_local_image_ready($img['path'])) {
+                $meta = ig_meta_from_image_info($img['meta'] ?? $info, $instagramUrl, $type, $img['path']);
+                $meta['kind'] = 'image';
+                ig_cache_write($cacheKey, $meta);
+                $mediaUrl = build_proxy_image_url($type, $id)
+                    ?? (IG_SITE_URL . '/media/' . basename($img['path']) . '?v=' . filemtime($img['path']));
+
+                return [
+                    'kind' => 'image',
+                    'meta' => $meta,
+                    'local_path' => $img['path'],
+                    'media_url' => $mediaUrl,
+                ];
+            }
+        }
+
+        error_log('[ig.weko.lol] prepare falló para ' . $instagramUrl);
+        return null;
     });
 }
 
@@ -386,6 +458,73 @@ function ig_probe_video_size(string $localPath): ?array
     }
 
     return ['width' => (int) $m[1], 'height' => (int) $m[2]];
+}
+
+/**
+ * @return array{width: int, height: int}|null
+ */
+function ig_probe_image_size(string $localPath): ?array
+{
+    if (!is_file($localPath)) {
+        return null;
+    }
+
+    if (function_exists('getimagesize')) {
+        $size = @getimagesize($localPath);
+        if (is_array($size) && !empty($size[0]) && !empty($size[1])) {
+            return ['width' => (int) $size[0], 'height' => (int) $size[1]];
+        }
+    }
+
+    return null;
+}
+
+/**
+ * @param array<string, mixed>|null $info
+ * @return array<string, mixed>
+ */
+function ig_meta_from_image_info(?array $info, string $instagramUrl, string $type, string $localPath): array
+{
+    $width = 1080;
+    $height = 1080;
+    $title = 'Instagram ' . $type;
+    $author = '';
+
+    if (is_array($info)) {
+        $title = (string) ($info['title'] ?? $title);
+        $author = (string) ($info['uploader'] ?? $info['channel'] ?? $info['creator'] ?? '');
+        $width = (int) ($info['width'] ?? $width);
+        $height = (int) ($info['height'] ?? $height);
+    }
+
+    $probed = ig_probe_image_size($localPath);
+    if ($probed !== null) {
+        $width = $probed['width'];
+        $height = $probed['height'];
+    }
+
+    return [
+        'direct_url' => '',
+        'title' => $title,
+        'author' => $author,
+        'thumbnail' => '',
+        'width' => $width > 0 ? $width : 1080,
+        'height' => $height > 0 ? $height : 1080,
+        'mime' => ig_guess_image_mime($localPath),
+        'duration' => null,
+        'fetched_at' => time(),
+        'instagram_url' => $instagramUrl,
+        'local' => true,
+        'kind' => 'image',
+    ];
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function ig_meta_from_image_local(string $localPath, string $instagramUrl, string $type): array
+{
+    return ig_meta_from_image_info(null, $instagramUrl, $type, $localPath);
 }
 
 function ig_cache_write(string $key, array $data): void

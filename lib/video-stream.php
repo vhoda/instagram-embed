@@ -283,14 +283,14 @@ function ig_with_media_lock(string $type, string $id, callable $fn): mixed
 /**
  * Materializa MP4 con audio vía yt-dlp (con lock + reintentos en ytdlp.php).
  *
- * @return array{ok: bool, meta: ?array}
+ * @return array{ok: bool, meta: ?array, warnings: string}
  */
 function ig_ensure_local_video(string $instagramUrl, string $localPath, bool $force = false): array
 {
     require_once __DIR__ . '/ytdlp.php';
 
     if (!$force && ig_local_video_ready($localPath)) {
-        return ['ok' => true, 'meta' => null];
+        return ['ok' => true, 'meta' => null, 'warnings' => ''];
     }
 
     if ($force || (is_file($localPath) && !ig_local_video_ready($localPath))) {
@@ -303,7 +303,79 @@ function ig_ensure_local_video(string $instagramUrl, string $localPath, bool $fo
     return [
         'ok' => (bool) ($result['ok'] ?? false),
         'meta' => is_array($result['meta'] ?? null) ? $result['meta'] : null,
+        'warnings' => (string) ($result['warnings'] ?? ''),
     ];
+}
+
+function ig_local_image_ready(string $localPath): bool
+{
+    if (!is_file($localPath) || filesize($localPath) < 200) {
+        return false;
+    }
+
+    if (is_file($localPath . '.ready')) {
+        return true;
+    }
+
+    @file_put_contents($localPath . '.ready', (string) time());
+    return true;
+}
+
+/**
+ * @return array{ok: bool, path: ?string, meta: ?array, warnings: string}
+ */
+function ig_ensure_local_image(
+    string $instagramUrl,
+    string $outputBase,
+    bool $force = false,
+    string $shortcode = '',
+    string $query = ''
+): array {
+    require_once __DIR__ . '/ytdlp.php';
+
+    if (!$force) {
+        $dir = dirname($outputBase);
+        $base = basename($outputBase);
+        foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
+            $path = $dir . '/' . $base . '.' . $ext;
+            if (ig_local_image_ready($path)) {
+                return ['ok' => true, 'path' => $path, 'meta' => null, 'warnings' => ''];
+            }
+        }
+    } else {
+        foreach (['jpg', 'jpeg', 'png', 'webp'] as $ext) {
+            $path = $outputBase . '.' . $ext;
+            @unlink($path);
+            @unlink($path . '.ready');
+        }
+    }
+
+    // 1) yt-dlp (a veces falla en posts solo-foto)
+    $viaYtdlp = ig_ytdlp_download_image($instagramUrl, $outputBase);
+    if ($viaYtdlp['ok']) {
+        return $viaYtdlp;
+    }
+
+    // 2) Fallback oficial: /p/{id}/media/?size=l
+    if ($shortcode === '' && preg_match('#/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)#', $instagramUrl, $m)) {
+        $shortcode = $m[1];
+    }
+
+    if ($shortcode !== '') {
+        $direct = ig_fetch_instagram_image_direct($shortcode, $outputBase, $query);
+        if ($direct['ok']) {
+            return $direct;
+        }
+
+        return [
+            'ok' => false,
+            'path' => null,
+            'meta' => null,
+            'warnings' => trim(($viaYtdlp['warnings'] ?? '') . ' | ' . ($direct['warnings'] ?? '')),
+        ];
+    }
+
+    return $viaYtdlp;
 }
 
 /**

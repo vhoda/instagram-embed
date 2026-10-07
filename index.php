@@ -44,7 +44,6 @@ $pageUrl = build_proxy_page_url($route['type'], $route['id'], $forwardQuery, fal
 $prepared = prepare_instagram_embed($route['type'], $route['id'], $forwardQuery);
 
 if ($prepared === null) {
-    // No mentir a Discord con og:video roto (evita cachear fallos)
     http_response_code(503);
     header('Content-Type: text/html; charset=utf-8');
     header('Cache-Control: no-store');
@@ -54,22 +53,23 @@ if ($prepared === null) {
         'UTF-8'
     );
     echo '<!DOCTYPE html><html lang="es"><head><meta charset="utf-8"><title>ig.weko.lol</title></head><body>';
-    echo '<p>Video temporalmente no disponible. <a href="' . $ig . '">Abrir en Instagram</a></p>';
+    echo '<p>Media temporalmente no disponible. <a href="' . $ig . '">Abrir en Instagram</a></p>';
     echo '</body></html>';
     exit;
 }
 
 $meta = $prepared['meta'];
-$videoUrl = $prepared['video_url'];
-$localPath = $prepared['local_path'];
+$mediaUrl = $prepared['media_url'];
+$kind = $prepared['kind'] ?? 'video';
 
 if ($wantRaw) {
-    // 302 al estático (Content-Length correcto vía webserver/CF)
-    header('Location: ' . $videoUrl, true, 302);
+    header('Location: ' . $mediaUrl, true, 302);
     exit;
 }
 
-$ogTags = build_discord_video_og_tags($pageUrl, $videoUrl, $meta);
+$ogTags = $kind === 'image'
+    ? build_discord_image_og_tags($pageUrl, $mediaUrl, $meta)
+    : build_discord_video_og_tags($pageUrl, $mediaUrl, $meta);
 
 header('Content-Type: text/html; charset=utf-8');
 header('Cache-Control: public, max-age=120');
@@ -86,5 +86,3 @@ header('Cache-Control: public, max-age=120');
 </head>
 <body></body>
 </html>
-<?php
-// Tras responder al bot, no hay más trabajo; el MP4 ya está en disco.

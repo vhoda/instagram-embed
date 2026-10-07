@@ -1,0 +1,9 @@
+# Servir MP4 estáticos (no pasar por index.php)
+Options -Indexes
+<IfModule mod_headers.c>
+    Header set Access-Control-Allow-Origin "*"
+    Header set Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+    Header set Access-Control-Allow-Headers "Range"
+    Header set Accept-Ranges "bytes"
+    Header set Cache-Control "public, max-age=86400"
+</IfModule>
